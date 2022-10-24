@@ -234,7 +234,143 @@ class PatchMerging(nn.Module):
         #print('PatchMerging output shape:',x.size())
         return x
     
-    
+class WindowAttention(nn.Module):
+    """ Window based multi-head self attention (W-MSA) module with relative position bias.
+    It supports both of shifted and non-shifted window.
+    Args:
+        dim (int): Number of input channels.
+        window_size (tuple[int]): The height and width of the window.
+        num_heads (int): Number of attention heads.
+        qkv_bias (bool, optional):  If True, add a learnable bias to query, key, value. Default: True
+        attn_drop (float, optional): Dropout ratio of attention weight. Default: 0.0
+        proj_drop (float, optional): Dropout ratio of output. Default: 0.0
+    """
+
+    def __init__(self, dim, window_size, num_heads, qkv_bias=True, attn_drop=0., proj_drop=0.,meta_network_hidden_features=256):
+
+        super().__init__()
+        self.dim = dim
+        self.window_size = window_size  # [Mh, Mw]
+        self.num_heads = num_heads
+        head_dim = dim // num_heads
+        #self.scale = head_dim ** -0.5
+
+        # define a parameter table of relative position bias
+        self.relative_position_bias_weight = nn.Parameter(
+            torch.zeros((2 * window_size[0] - 1) * (2 * window_size[1] - 1), num_heads))  # [2*Mh-1 * 2*Mw-1, nH]
+        # 获取窗口内每对token的相对位置索引
+        # get pair-wise relative position index for each token inside the window
+        # coords_h = torch.arange(self.window_size[0])
+        # coords_w = torch.arange(self.window_size[1])
+        # coords = torch.stack(torch.meshgrid([coords_h, coords_w] ))  # [2, Mh, Mw]indexing="ij"
+        # coords_flatten = torch.flatten(coords, 1)  # [2, Mh*Mw]
+        # # [2, Mh*Mw, 1] - [2, 1, Mh*Mw]
+        # relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]  # [2, Mh*Mw, Mh*Mw]
+        # relative_coords = relative_coords.permute(1, 2, 0).contiguous()  # [Mh*Mw, Mh*Mw, 2]
+        # relative_coords[:, :, 0] += self.window_size[0] - 1  # shift to start from 0
+        # relative_coords[:, :, 1] += self.window_size[1] - 1
+        # relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1
+        # relative_position_index = relative_coords.sum(-1)  # [Mh*Mw, Mh*Mw]
+        # self.register_buffer("relative_position_index", relative_position_index)
+        # Init meta network for positional encodings
+        self.meta_network: nn.Module = nn.Sequential(
+            nn.Linear(in_features=2, out_features=meta_network_hidden_features, bias=True),
+            nn.ReLU(inplace=True),
+            nn.Linear(in_features=meta_network_hidden_features, out_features=num_heads, bias=True))
+        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+         
+        nn.init.trunc_normal_(self.relative_position_bias_weight, std=.02)
+        self.softmax = nn.Softmax(dim=-1)
+          # Init tau
+        self.register_parameter("tau", nn.Parameter(torch.zeros(1, num_heads, 1, 1)))
+
+         # Init pair-wise relative positions (log-spaced)
+        indexes = torch.arange(self.window_size[0], device=self.tau.device)
+        coordinates = torch.stack(torch.meshgrid([indexes, indexes]), dim=0)
+        coordinates = torch.flatten(coordinates, start_dim=1)
+        relative_coordinates = coordinates[:, :, None] - coordinates[:, None, :]
+        relative_coordinates = relative_coordinates.permute(1, 2, 0).reshape(-1, 2).float()
+        relative_coordinates_log = torch.sign(relative_coordinates) \
+                                                 * torch.log(1. + relative_coordinates.abs())
+        self.register_buffer("relative_coordinates_log", relative_coordinates_log) 
+
+        
+    def get_relative_positional_encodings(self) :
+        """
+        Method computes the relative positional encodings
+        :return: Relative positional encodings [1, number of heads, window size ** 2, window size ** 2]
+        """
+        relative_position_bias = self.meta_network(self.relative_coordinates_log)
+        relative_position_bias = relative_position_bias.permute(1, 0)
+        relative_position_bias = relative_position_bias.reshape(self.num_heads, self.window_size[0] * self.window_size[1],\
+                                                                                        self.window_size[0] * self.window_size[1])
+        return relative_position_bias.unsqueeze(0)
+        
+    def forward(self, x, mask = None):
+        """
+        Args:
+            x: input features with shape of (num_windows*B, Mh*Mw, C)
+            mask: (0/-inf) mask with shape of (num_windows, Wh*Ww, Wh*Ww) or None
+        """
+        # [batch_size*num_windows, Mh*Mw, total_embed_dim]
+        B_, N, C = x.shape
+        # qkv(): -> [batch_size*num_windows, Mh*Mw, 3 * total_embed_dim]
+        # reshape: -> [batch_size*num_windows, Mh*Mw, 3, num_heads, embed_dim_per_head]
+        # permute: -> [3, batch_size*num_windows, num_heads, Mh*Mw, embed_dim_per_head]
+        qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        # [batch_size*num_windows, num_heads, Mh*Mw, embed_dim_per_head]
+        q, k, v = qkv.unbind(0)  # make torchscript happy (cannot use tensor as tuple)
+        attn = torch.einsum("bhqd, bhkd -> bhqk", q, k) \
+                                      / torch.maximum(torch.norm(q, dim=-1, keepdim=True)
+                                                      * torch.norm(k, dim=-1, keepdim=True).transpose(-2, -1),
+                                                      torch.tensor(1e-06, device=q.device, dtype=q.dtype))
+        # transpose: -> [batch_size*num_windows, num_heads, embed_dim_per_head, Mh*Mw]
+        # @: multiply -> [batch_size*num_windows, num_heads, Mh*Mw, Mh*Mw]
+        #q = q * self.scale
+        # cosine -->dot?????? Scaled cosine attention：cosine(q,k)/tau 也许理解的不准确： 控制数值范围有利于训练稳定 （残差块的累加 导致深层难以稳定训练）
+        # attn = (q @ k.transpose(-2, -1))
+        # q = torch.norm(q, p=2, dim=-1)
+        # k = torch.norm(k, p=2, dim=-1)
+        # attn /= q.unsqueeze(-1)
+        # attn /= k.unsqueeze(-2)
+        #attn=attention_map
+        #print('attn shape:',attn.size())
+        #print('attn2 shape:',attention_map.size())
+        attn/=self.tau.clamp(min=0.01)
+        
+        # relative_position_bias_table.view: [Mh*Mw*Mh*Mw,nH] -> [Mh*Mw,Mh*Mw,nH]
+        # relative_position_bias = self.relative_position_bias_weight[self.relative_position_index.view(-1)].view(
+        #     self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1)
+        # relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # [nH, Mh*Mw, Mh*Mw]
+       # print("net work new positional_enco:",self.__get_relative_positional_encodings().size())
+        #print('attn shape:',attn.size())
+        #attn = attn + relative_position_bias.unsqueeze(0)
+        attn = attn + self.get_relative_positional_encodings()
+        if mask is not None:
+            # mask: [nW, Mh*Mw, Mh*Mw]
+            nW = mask.shape[0]  # num_windows
+            # attn.view: [batch_size, num_windows, num_heads, Mh*Mw, Mh*Mw]
+            # mask.unsqueeze: [1, nW, 1, Mh*Mw, Mh*Mw]
+            attn = attn.view(B_ // nW, nW, self.num_heads, N, N) + mask.unsqueeze(1).unsqueeze(0)
+            attn = attn.view(-1, self.num_heads, N, N)
+            attn = self.softmax(attn)
+        else:
+            attn = self.softmax(attn)
+
+        attn = self.attn_drop(attn)
+
+        # @: multiply -> [batch_size*num_windows, num_heads, Mh*Mw, embed_dim_per_head]
+        # transpose: -> [batch_size*num_windows, Mh*Mw, num_heads, embed_dim_per_head]
+        # reshape: -> [batch_size*num_windows, Mh*Mw, total_embed_dim]
+       # x = (attn @ v).transpose(1, 2).reshape(B_, N, C)  ## float()
+        x = torch.einsum("bhal, bhlv -> bhav", attn, v)
+        #x = self.proj(x)
+        #x = self.proj_drop(x)
+        #print('out shape:',x.size())
+        return x
    
 class SwinTransformerBlock(nn.Module):
     r""" Swin Transformer Block.
