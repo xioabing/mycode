@@ -88,6 +88,122 @@ def autopad(k, p=None):  # kernel, padding
 #         out2 = self.spatial_attention(self.cv2(x)) * self.cv2(x)
 #         # print('outchannels:{}'.format(out1.shape))
 #         return self.cv3(torch.cat((out1, out2), dim=1))
+class SwinTransformer_Layer(nn.Module):
+    """
+    A basic Swin Transformer layer for one stage.
+    Args:
+        dim (int): Number of input channels.
+        depth (int): Number of blocks.
+        num_heads (int): Number of attention heads.
+        window_size (int): Local window size:  7 or 8 
+        mlp_ratio (float): Ratio of mlp hidden dim to embedding dim.
+        qkv_bias (bool, optional): If True, add a learnable bias to query, key, value. Default: True
+        drop (float, optional): Dropout rate. Default: 0.0
+        attn_drop (float, optional): Attention dropout rate. Default: 0.0
+        drop_path (float | tuple[float], optional): Stochastic depth rate. Default: 0.0
+        norm_layer (nn.Module, optional): Normalization layer. Default: nn.LayerNorm
+        downsample (nn.Module | None, optional): Downsample layer at the end of the layer. Default: None
+        use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False.
+    """
+
+    def __init__(self, dim, depth, num_heads,last_layer=False, window_size=7,
+                 mlp_ratio=4., qkv_bias=True, drop=0., attn_drop=0.,
+                 drop_path=0., norm_layer=nn.LayerNorm, downsample=PatchMerging, use_checkpoint=False):
+        super().__init__()
+        self.dim = dim
+        self.depth = depth
+        self.last_layer=last_layer
+        self.window_size = window_size
+        self.use_checkpoint = use_checkpoint
+        self.shift_size = window_size // 2
+
+        # build blocks
+        self.blocks = nn.ModuleList([
+            SwinTransformerBlock(
+                dim=dim,
+                num_heads=num_heads,
+                window_size=window_size,
+                shift_size=0 if (i % 2 == 0) else self.shift_size,
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+                drop=drop,
+                attn_drop=attn_drop,
+                drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
+                norm_layer=norm_layer,
+                Global=False)
+            for i in range(depth)])
+
+        # patch merging layer
+   
+        if self.last_layer is False:
+            #print('开始进行patchmergin------打印层深度：',depth)
+            self.downsample = downsample(dim=dim, norm_layer=norm_layer)
+        else:
+            #print('最后1层默认没有Patchmerging：',depth)
+            #self.norm = norm_layer(self.num_features)
+            #self.avgpool = nn.AdaptiveAvgPool1d(1)
+            self.downsample = None
+        self.avgpool = nn.AdaptiveAvgPool1d(1)
+
+    def create_mask(self, x, H, W):
+        # calculate attention mask for SW-MSA
+        # 保证Hp和Wp是window_size的整数倍
+        Hp = int(np.ceil(H / self.window_size)) * self.window_size
+        Wp = int(np.ceil(W / self.window_size)) * self.window_size
+        # 拥有和feature map一样的通道排列顺序，方便后续window_partition
+        img_mask = torch.zeros((1, Hp, Wp, 1), device=x.device)  # [1, Hp, Wp, 1]
+        h_slices = (slice(0, -self.window_size),
+                    slice(-self.window_size, -self.shift_size),
+                    slice(-self.shift_size, None))
+        w_slices = (slice(0, -self.window_size),
+                    slice(-self.window_size, -self.shift_size),
+                    slice(-self.shift_size, None))
+        cnt = 0
+        for h in h_slices:
+            for w in w_slices:
+                img_mask[:, h, w, :] = cnt
+                cnt += 1
+
+        mask_windows = window_partition(img_mask, self.window_size)  # [nW, Mh, Mw, 1]
+        mask_windows = mask_windows.view(-1, self.window_size * self.window_size)  # [nW, Mh*Mw]
+        attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)  # [nW, 1, Mh*Mw] - [nW, Mh*Mw, 1]
+        # [nW, Mh*Mw, Mh*Mw]
+        attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
+        return attn_mask
+
+    def forward(self, x):
+        #print('swinlayers input shape:',x.size())
+        B, C, H, W = x.size()
+        #H=int(L**0.5)
+       # W=H 
+       # assert L == H * W, "input feature has wrong size"
+       
+        attn_mask = self.create_mask(x, H, W)  # [nW, Mh*Mw, Mh*Mw]
+        for blk in self.blocks:
+            blk.H, blk.W = H, W
+            if not torch.jit.is_scripting() and self.use_checkpoint:
+                x = checkpoint.checkpoint(blk, x, attn_mask)
+            else:
+                x = blk(x, attn_mask)
+        if self.downsample is not None:
+            x = self.downsample(x, H, W)
+            H, W = (H + 1) // 2, (W + 1) // 2
+        
+       # if  self.last_layer:
+           # x=x.view(B,H,W,C)
+            #x=x.transpose(1,3)
+           # x = self.norm(x)  # [B, L, C]
+            #x = self.avgpool(x.transpose(1, 2))  # [B, C, 1]
+       
+            #x = x.view(B,-1,H,W)
+           # x = window_reverse(x, self.window_size, H, W)  # [B, H', W', C]
+            #x = torch.flatten(x, 1)
+        x = x.view(B, -1, H, W)  #  
+        #print("Swin-Transform 层 ------------------------输出维度:",x.size())
+        return x 
+        
+
+##### repvgg #####
 
 class GAMAttention(nn.Module):
        #https://paperswithcode.com/paper/global-attention-mechanism-retain-information
