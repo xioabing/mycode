@@ -32,15 +32,11 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import SGD, Adam, AdamW, lr_scheduler
 from tqdm import tqdm
 
-# FILE = Path(__file__).resolve()
-# ROOT = FILE.parents[0]  # YOLOv5 root directory
-# if str(ROOT) not in sys.path:
-#     sys.path.append(str(ROOT))  # add ROOT to PATH
-# ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
-
-
-FILE = Path(__file__).absolute()
-sys.path.append(FILE.parents[0].as_posix())  # add yolov5/ to path
+FILE = Path(__file__).resolve()
+ROOT = FILE.parents[0]  # YOLOv5 root directory
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))  # add ROOT to PATH
+ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 
 import val  # for end-of-epoch mAP
 from models.experimental import attempt_load
@@ -288,7 +284,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
     stopper = EarlyStopping(patience=opt.patience)
     if opt.auxotaloss: # https://github.com/iscyy/yoloair
         compute_loss_ota = ComputeLossAuxOTA(model)  # init loss class
-        compute_loss = ComputeLoss(model) 
+        compute_loss = ComputeLoss(model)
     elif opt.otaloss == 'yolov7':
         compute_loss_ota = ComputeLossOTA_v7(model)
         compute_loss = ComputeLoss(model)
@@ -304,7 +300,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                 f'Using {train_loader.num_workers * WORLD_SIZE} dataloader workers\n'
                 f"Logging results to {colorstr('bold', save_dir)}\n"
                 f'Starting training for {epochs} epochs...')
-    
+
     is_distributed = is_parallel(model)
     if is_distributed:
         detect = model.module.model[-1]
@@ -342,7 +338,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
             train_loader.sampler.set_epoch(epoch)
         pbar = enumerate(train_loader)
         # LOGGER.info(('\n' + '%10s' * 7) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'labels', 'img_size'))
-        
+
         if RANK in [-1, 0]:
             pbar = tqdm(pbar, total=nb, bar_format='{l_bar}{bar:10}{r_bar}{bar:-10b}')  # progress bar
         optimizer.zero_grad()
@@ -505,10 +501,10 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
 
 def parse_opt(known=False):
     parser = argparse.ArgumentParser()
-    parser.add_argument('--weights', type=str, default='', help='initial weights path')
-    parser.add_argument('--cfg', type=str, default='', help='model.yaml path')
-    parser.add_argument('--data', type=str, default='data/mydataset', help='dataset.yaml path')
-    parser.add_argument('--hyp', type=str, default='data/hyps/hyp.scratch-low.yaml', help='hyperparameters path')
+    parser.add_argument('--weights', type=str, default=ROOT / '', help='initial weights path')
+    parser.add_argument('--cfg', type=str, default='configs/yolov5-standard/yolov5s.yaml', help='model.yaml path')
+    parser.add_argument('--data', type=str, default= 'data/mydataset.yaml', help='dataset.yaml path')
+    parser.add_argument('--hyp', type=str, default=ROOT / 'data/hyps/hyp.scratch-low.yaml', help='hyperparameters path')
     parser.add_argument('--epochs', type=int, default=1)
 
     parser.add_argument('--loss', type=str, default='origin', help='')
@@ -531,7 +527,7 @@ def parse_opt(known=False):
     parser.add_argument('--optimizer', type=str, choices=['SGD', 'Adam', 'AdamW'], default='SGD', help='optimizer')
     parser.add_argument('--sync-bn', action='store_true', help='use SyncBatchNorm, only available in DDP mode')
     parser.add_argument('--workers', type=int, default=0, help='max dataloader workers (per RANK in DDP mode)')
-    parser.add_argument('--project', default= 'runs/train', help='save to project/name')
+    parser.add_argument('--project', default=ROOT / 'runs/train', help='save to project/name')
     parser.add_argument('--name', default='exp', help='save to project/name')
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
     parser.add_argument('--quad', action='store_true', help='quad dataloader')
@@ -572,8 +568,8 @@ def main(opt, callbacks=Callbacks()):
             check_file(opt.data), check_yaml(opt.cfg), check_yaml(opt.hyp), str(opt.weights), str(opt.project)  # checks
         assert len(opt.cfg) or len(opt.weights), 'either --cfg or --weights must be specified'
         if opt.evolve:
-            if opt.project == str('runs/train'):  # if default project name, rename to runs/evolve
-                opt.project = str( 'runs/evolve')
+            if opt.project == str(ROOT / 'runs/train'):  # if default project name, rename to runs/evolve
+                opt.project = str(ROOT / 'runs/evolve')
             opt.exist_ok, opt.resume = opt.resume, False  # pass resume to exist_ok and disable resume
         opt.save_dir = str(increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok))
 
@@ -697,3 +693,4 @@ def run(**kwargs):
 if __name__ == "__main__":
     opt = parse_opt()
     main(opt)
+# Write mutation results
