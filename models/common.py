@@ -1407,3 +1407,48 @@ class MPC(nn.Module):
         x2 = self.cv2(x)
         out = torch.cat([x1, x2], dim=1)
         return out
+      
+      
+class Bottleneckvov(nn.Module):
+    # Standard bottleneck
+    def __init__(self, c1, c2, shortcut=True, g=1, e=0.5):  # ch_in, ch_out, shortcut, groups, expansion
+        super().__init__()
+        c_ = int(c2 * e)  # hidden channels
+        c__= int(c2 * e)
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv(c_, c2, 3, 1, g=g)
+
+        self.cv3 = Conv(c1, c2, 1, 1)
+
+        self.cv4 = Conv(c1, c_, 1, 1)
+        self.cv5 = Conv(c_, c__, 3, 1, g=g)
+        self.cv6 = Conv(c__, c2, 3, 1, g=g)
+
+        self.cv7 = Conv(c2*3, c2, 1, 1, g=g)
+
+        self.add = shortcut and c1 == c2
+
+    def forward(self, x):
+        x1 = self.cv2(self.cv1(x))
+        x2 = self.cv3(x)
+        x3 = self.cv6(self.cv5(self.cv4(x)))
+        x4 = self.cv7(torch.cat((x1,x2,x3),dim=1))
+
+
+        return x + x4 if self.add else x4
+
+class C3vov(nn.Module):
+    # CSP Bottleneck with 3 convolutions
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):  # ch_in, ch_out, number, shortcut, groups, expansion
+        super().__init__()
+        c_ = int(c2 * e)  # hidden channels
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv(c1, c_, 1, 1)
+        self.SimAM = SimAM(2*c_)
+        self.cv3 = Conv(2 * c_, c2, 1)  # act=FReLU(c2)
+        self.m = nn.Sequential(*(Bottleneckvov(c_, c_, shortcut, g, e=1.0) for _ in range(n)))
+
+    def forward(self, x):
+        x1 = torch.cat((self.m(self.cv1(x)), self.cv2(x)), dim=1)
+        x2 = self.SimAM(x1)
+        return self.cv3(x2)
