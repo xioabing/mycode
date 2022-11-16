@@ -2,11 +2,11 @@
 
 
 # train and val data as 1) directory: path/images/, 2) file: path/images.txt, or 3) list: [path1/images/, path2/images/]
-train: /content/datasets/xiaobing2206/mydataset/images/train
-val: /content/datasets/xiaobing2206/mydataset/images/val
+train: ./usvdata/images/train
+val: ./usvdata/images/val
 
 # number of classes
 nc: 1
 
-# class names  names:  ['bottle',  'milk-box', 'plastic-bag', 'plastic-garbage']
-names:  ['bottle']
+# class names  names: ['bottle',  'milk-box', 'plastic-bag', 'plastic-garbage'，‘branch’,'leaf','ball','grass']
+names:  ['bottle',  'milk-box', 'plastic-bag', 'plastic-garbage'，‘branch’,'leaf','ball','grass']
